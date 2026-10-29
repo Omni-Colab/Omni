@@ -6,17 +6,44 @@
 
 ---
 
+## 0. v0.1 foundation: health checks
+
+These endpoints are part of the v0.1 foundation and are intentionally outside the `/api/v1/auth` namespace.
+
+### `GET /healthz`
+
+Liveness endpoint. Returns `200` when the service process is alive.
+
+| Status | Body |
+|---|---|
+| 200 | `{ "status": "ok" }` |
+
+### `GET /readyz`
+
+Readiness endpoint. Returns `200` only when required backing services are reachable.
+
+| Status | Body |
+|---|---|
+| 200 | `{ "status": "ready", "checks": { "postgres": "ok", "redis": "ok", "nats": "ok" } }` |
+| 503 | `{ "status": "not_ready", "checks": { "postgres": "down", "redis": "ok", "nats": "ok" } }` |
+
+The ready check must report Postgres, Redis, and NATS connectivity; v0.1 tests rely on this signal.
+
+---
+
 ## 1. Conventions
 
 | Item | Decision |
 |---|---|
-| Base path | `/api/v1/auth` |
+| Auth base path | `/api/v1/auth` |
+| User profile base path | `/api/v1/users` |
 | Format | JSON request and response (`Content-Type: application/json`), except `204` responses with no body |
 | IDs | UUID, lowercase string |
 | Timestamps | RFC 3339, UTC (`2026-10-25T12:00:00Z`) |
 | Field naming | `snake_case` |
 | Email handling | Trimmed and lowercased before validation and storage; unique |
 | Auth header (protected routes) | `Authorization: Bearer <access_token>` |
+| Refresh cookie path | `/api/v1/auth` |
 | CORS | Allowed origin from env (`CORS_ALLOWED_ORIGIN`), `Access-Control-Allow-Credentials: true` |
 | Frontend fetch | Calls that rely on the refresh cookie must use `credentials: "include"` |
 
@@ -60,7 +87,10 @@ Every non-2xx response uses this body:
 |---|---|
 | `email` | Required, valid format, max 254 chars |
 | `password` | Required, 8 to 128 characters, no composition rules (length matters more) |
-| `display_name` | Required on register, 1 to 50 characters after trimming |
+| `current_password` | Required, 8 to 128 characters |
+| `new_password` | Required, 8 to 128 characters |
+| `display_name` | Required on register and profile update, 1 to 50 characters after trimming |
+| `device_name` | Optional, 1 to 100 characters after trimming |
 | `token` | Required, non-empty string, max 256 chars |
 
 ---
@@ -123,7 +153,21 @@ Request: `{ "token": "<token from email>" }`
 | 400 | `VALIDATION_ERROR` or `TOKEN_INVALID_OR_EXPIRED` |
 | 429 | `RATE_LIMITED` |
 
-### 5.3 `POST /api/v1/auth/login`
+### 5.3 `POST /api/v1/auth/resend-verification`
+
+Resends the email verification link for a user whose account exists but is not yet verified.
+
+Request: `{ "email": "alex@example.com" }`
+
+Always returns the same response regardless of whether the account exists, to avoid account enumeration. If the user exists and is unverified, a new verification email is sent.
+
+| Status | Body |
+|---|---|
+| 202 | `{ "message": "If an account exists for that email and is unverified, a new verification link has been sent." }` |
+| 400 | `VALIDATION_ERROR` |
+| 429 | `RATE_LIMITED` |
+
+### 5.4 `POST /api/v1/auth/login`
 
 Request:
 
@@ -141,7 +185,7 @@ Request:
 | 403 | `EMAIL_NOT_VERIFIED` |
 | 429 | `RATE_LIMITED` |
 
-### 5.4 `POST /api/v1/auth/refresh`
+### 5.5 `POST /api/v1/auth/refresh`
 
 No body. Reads the refresh cookie, rotates it, and returns a new access token. The frontend calls this on page load to restore the session, since the access token only lives in memory.
 
@@ -151,7 +195,7 @@ No body. Reads the refresh cookie, rotates it, and returns a new access token. T
 | 401 | `INVALID_REFRESH_TOKEN` + cookie cleared |
 | 429 | `RATE_LIMITED` |
 
-### 5.5 `POST /api/v1/auth/logout`
+### 5.6 `POST /api/v1/auth/logout`
 
 No body. Reads the refresh cookie only, so it works even when the access token has expired. Idempotent: always returns `204` and clears the cookie, even if the cookie was missing or invalid.
 
@@ -159,7 +203,7 @@ No body. Reads the refresh cookie only, so it works even when the access token h
 |---|---|
 | 204 | none, cookie cleared |
 
-### 5.6 `POST /api/v1/auth/forgot-password`
+### 5.7 `POST /api/v1/auth/forgot-password`
 
 Request: `{ "email": "alex@example.com" }`
 
@@ -171,7 +215,7 @@ Always returns the same response, whether or not the email exists, to prevent ac
 | 400 | `VALIDATION_ERROR` (malformed email only) |
 | 429 | `RATE_LIMITED` |
 
-### 5.7 `POST /api/v1/auth/reset-password`
+### 5.8 `POST /api/v1/auth/reset-password`
 
 Request: `{ "token": "<token from email>", "new_password": "new strong password" }`
 
@@ -181,6 +225,50 @@ On success the token is consumed, the password is re-hashed with Argon2id, and *
 |---|---|
 | 200 | `{ "message": "Password updated." }` |
 | 400 | `VALIDATION_ERROR` or `TOKEN_INVALID_OR_EXPIRED` |
+| 429 | `RATE_LIMITED` |
+
+### 5.9 `GET /api/v1/users/me`
+
+Protected route. Returns the authenticated user's profile. This is the first API route that exercises the JWT authentication middleware in a real endpoint.
+
+| Status | Body |
+|---|---|
+| 200 | `{ "user": <User> }` |
+| 401 | `UNAUTHORIZED` |
+| 429 | `RATE_LIMITED` |
+
+### 5.10 `PATCH /api/v1/users/me`
+
+Protected route. Updates the authenticated user's `display_name`.
+
+Request:
+
+```json
+{ "display_name": "Alex Morgan" }
+```
+
+| Status | Body |
+|---|---|
+| 200 | `{ "user": <User> }` |
+| 400 | `VALIDATION_ERROR` |
+| 401 | `UNAUTHORIZED` |
+| 429 | `RATE_LIMITED` |
+
+### 5.11 `POST /api/v1/users/me/change-password`
+
+Protected route. Validates the current password, then rehashes the password and revokes all sessions for the user except the current one until the next refresh or re-authentication cycle.
+
+Request:
+
+```json
+{ "current_password": "old-password", "new_password": "new-strong-password" }
+```
+
+| Status | Body |
+|---|---|
+| 200 | `{ "message": "Password updated." }` |
+| 400 | `VALIDATION_ERROR` |
+| 401 | `INVALID_CREDENTIALS` or `UNAUTHORIZED` |
 | 429 | `RATE_LIMITED` |
 
 ---
@@ -214,7 +302,7 @@ On success the token is consumed, the password is re-hashed with Argon2id, and *
 | Name | `refresh_token` |
 | `HttpOnly` | yes |
 | `Secure` | yes in staging and production; off only for local HTTP development (`COOKIE_SECURE=false`) |
-| `SameSite` | `Lax` by default; configurable via `COOKIE_SAMESITE` (see open decision 2) |
+| `SameSite` | `Lax` by default; configurable via `COOKIE_SAMESITE` (see open decision 1) |
 | `Path` | `/api/v1/auth` |
 | `Max-Age` | `2592000` (30 days) |
 | Clearing | Same name, `Path`, `Secure`, `SameSite`, with `Max-Age=0` |
@@ -248,9 +336,11 @@ Phase 1 runs a single instance, so limits are in memory behind the `RateLimiter`
 |---|---|
 | `register` | 5 per hour per IP |
 | `login` | 10 per 15 min per IP, and 5 per 15 min per email |
+| `resend-verification` | 3 per hour per email, and 10 per hour per IP |
 | `forgot-password` | 3 per hour per email, and 10 per hour per IP |
 | `verify-email` | 10 per hour per IP |
 | `reset-password` | 10 per hour per IP |
+| `change-password` | 10 per hour per user |
 | `refresh` | 60 per minute per IP |
 
 Exceeded limits return `429`, `RATE_LIMITED`, and a `Retry-After` header.
@@ -280,11 +370,13 @@ type UserRepository interface {
     GetByEmail(ctx context.Context, email string) (*User, error)
     MarkEmailVerified(ctx context.Context, id uuid.UUID) error
     UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error
+    UpdateDisplayName(ctx context.Context, id uuid.UUID, displayName string) error
 }
 
 type SessionRepository interface {
     Create(ctx context.Context, s *Session) error
     GetByRefreshHash(ctx context.Context, hash string) (s *Session, isPrevious bool, err error)
+    ListByUser(ctx context.Context, userID uuid.UUID) ([]*Session, error)
     RotateRefresh(ctx context.Context, id uuid.UUID, newHash string, newExpiry time.Time) error
     Revoke(ctx context.Context, id uuid.UUID) error
     RevokeAllForUser(ctx context.Context, userID uuid.UUID) error
@@ -326,6 +418,11 @@ Interfaces beyond the five required ones (`OneTimeTokenRepository`, `RateLimiter
 
 | # | Question | Default if no objection |
 |---|---|---|
-| 1 | **Resend verification:** an expired verification token leaves the user stuck, and the contract has no resend endpoint. Add `POST /api/v1/auth/resend-verification` (always `202`, same enumeration-safe pattern)? | Add it; it is small and needed for a usable flow |
-| 2 | **Cookie `SameSite` in staging:** if the frontend and API are on different registrable domains, `Lax` will not send the cookie and staging needs `None` + `Secure`. Decide when picking hosting in SUP-13 | `Lax`, with the env override |
-| 3 | **Duplicate registration:** `409 EMAIL_ALREADY_REGISTERED` is clearer for users but reveals that an email exists. Rate limiting reduces the abuse | Keep `409` |
+| 1 | **Cookie `SameSite` in staging:** if the frontend and API are on different registrable domains, `Lax` will not send the cookie and staging needs `None` + `Secure`. Decide when picking hosting in staging. | `Lax` in local/dev; `None` + `Secure` only when cross-site cookies are required |
+| 2 | **Duplicate registration:** `409 EMAIL_ALREADY_REGISTERED` is clearer for users but reveals that an email exists. Rate limiting reduces the abuse. | Keep `409` |
+
+---
+
+## Appendix: v0.2 scope notes
+
+This contract intentionally includes the user profile flow required to validate authenticated access control and account-management behavior. The session list/revoke endpoints remain out of scope for v0.2 and should be added in a later contract unless the team explicitly decides to include them in this PR.
