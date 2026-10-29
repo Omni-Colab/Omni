@@ -418,11 +418,15 @@ Interfaces beyond the five required ones (`OneTimeTokenRepository`, `RateLimiter
 
 | # | Question | Default if no objection |
 |---|---|---|
-| 1 | **Cookie `SameSite` in staging:** if the frontend and API are on different registrable domains, `Lax` will not send the cookie and staging needs `None` + `Secure`. Decide when picking hosting in staging. | `Lax` in local/dev; `None` + `Secure` only when cross-site cookies are required |
+| 1 | **Cookie `SameSite` in staging:** if the frontend and API are on different registrable domains, `Lax` will not send the cookie and staging needs `None` + `Secure`. Decide when picking hosting and deployment topology. | Use `Lax` for same-site deployments; `None` + `Secure` when frontend and API are on different registrable domains. |
 | 2 | **Duplicate registration:** `409 EMAIL_ALREADY_REGISTERED` is clearer for users but reveals that an email exists. Rate limiting reduces the abuse. | Keep `409` |
 
 ---
 
 ## Appendix: v0.2 scope notes
 
-This contract intentionally includes the user profile flow required to validate authenticated access control and account-management behavior. The session list/revoke endpoints remain out of scope for v0.2 and should be added in a later contract unless the team explicitly decides to include them in this PR.
+This contract intentionally includes the user profile flow required to validate authenticated access control and account-management behavior. It does not define session-listing or session-revocation endpoints in v0.2, because those are separate product decisions and should not be assumed to exist unless explicitly added later.
+
+The v0.1 health checks (`GET /healthz` and `GET /readyz`) are intentionally outside the auth namespace and are included here as the foundation that the backend services expose before identity v0.2 work begins.
+
+If session-management endpoints are added later, they should remain under the `/api/v1/auth` namespace and follow the same cookie, JWT, and rate-limit conventions defined in this contract.
